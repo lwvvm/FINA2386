@@ -1,0 +1,308 @@
+---
+title: "Combined Analysis — Boxplots & QAP"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+base_path <- "C:/Users/Lenovo/Desktop/HKU/25-26Fall/FINA2386/Group"
+library(readr); library(dplyr); library(tidyr); library(stringr); library(ggplot2)
+library(pheatmap); library(sna); library(countrycode); library(Matrix); library(viridis); library(ggpubr); library(scales)
+```
+
+## Read & clean edge list
+
+```{r read-clean}
+edge_files <- c('more.csv')
+edge_path <- NULL
+for(f in edge_files){ p <- file.path(base_path, f); if(file.exists(p)){ edge_path <- p; break } }
+if(is.null(edge_path)) stop('No edge list found (expected more.csv)')
+edges <- readr::read_csv(edge_path, guess_max = 10000, show_col_types = FALSE)
+
+# headerless detection
+col_names_preview <- names(edges)
+if(all(grepl('^[A-Z]{2,3}$', col_names_preview)) || sum(grepl('^[A-Z]{2,3}$', col_names_preview)) >= 2){
+  edges <- readr::read_csv(edge_path, col_names = FALSE, show_col_types = FALSE)
+  if(ncol(edges) >= 2) names(edges)[1:2] <- c('origin','destination')
+}
+
+# simple cleaning helper (keeps minimal behaviour)
+clean_edges <- function(df){
+  names(df) <- tolower(names(df))
+  find_col <- function(cands){
+    for(c in cands){ m <- grep(paste0('^',c,'$'), names(df), ignore.case = TRUE); if(length(m)) return(names(df)[m[1]]) }
+    for(c in cands){ m <- agrep(c, names(df), ignore.case = TRUE, max.distance = 0.2); if(length(m)) return(names(df)[m[1]]) }
+    return(NA)
+  }
+  ocol <- find_col(c('origin','sender','citizen','citizenship','from'))
+  dcol <- find_col(c('destination','receiver','dest','to','countryofexploitation'))
+  if(is.na(ocol) | is.na(dcol)) stop('Could not locate origin/destination columns in edges')
+  df <- df %>% rename(origin = !!sym(ocol), destination = !!sym(dcol))
+  df <- df %>% mutate(origin = toupper(trimws(as.character(origin))), destination = toupper(trimws(as.character(destination))))
+  df <- df %>% filter(!is.na(origin), origin!='', !is.na(destination), destination!='')
+  df <- df %>% filter(origin != destination)
+  df
+}
+
+edges <- tryCatch(clean_edges(edges), error = function(e) stop('Error cleaning edges: ', e$message))
+cat('Loaded edges — rows:', nrow(edges), 'unique countries:', length(unique(c(edges$origin, edges$destination))), '\n')
+```
+
+## Compute counts and country roles
+
+```{r counts-roles}
+# aggregated counts
+origin_counts <- edges %>% group_by(origin) %>% summarise(origin_count = n(), .groups='drop')
+destination_counts <- edges %>% group_by(destination) %>% summarise(destination_count = n(), .groups='drop')
+
+# country roles (origin/destination presence)
+country_roles <- full_join(origin_counts %>% rename(country = origin), destination_counts %>% rename(country = destination), by = 'country') %>%
+  mutate(as_origin = ifelse(is.na(origin_count), 0, origin_count), as_destination = ifelse(is.na(destination_count), 0, destination_count)) %>%
+  mutate(role = case_when(as_origin > 0 & as_destination > 0 ~ 'Both', as_origin > 0 ~ 'Primarily origin', as_destination > 0 ~ 'Primarily destination'))
+
+# build a simple panel for cross-sectional analysis: use countries that appear in edges
+active_countries <- sort(unique(c(edges$origin, edges$destination)))
+panel <- data.frame(country = active_countries, stringsAsFactors = FALSE)
+panel <- panel %>% left_join(origin_counts %>% rename(country = origin), by = 'country') %>% left_join(destination_counts %>% rename(country = destination), by = 'country')
+panel$origin_count[is.na(panel$origin_count)] <- 0
+panel$destination_count[is.na(panel$destination_count)] <- 0
+panel <- panel %>% left_join(country_roles %>% select(country, role), by = 'country')
+```
+
+## Merge GDP (latest available) and prepare plotting variables
+
+```{r merge-gdp}
+gdp_file <- file.path(base_path,'gdp.csv')
+if(!file.exists(gdp_file)) stop('gdp.csv not found')
+gdp_raw <- readr::read_csv(gdp_file, show_col_types = FALSE)
+gdp_cols_low <- tolower(names(gdp_raw))
+cn_col <- names(gdp_raw)[which(gdp_cols_low %in% c('country name','country_name','country'))[1]]
+cc_col <- names(gdp_raw)[which(gdp_cols_low %in% c('country code','country_code','countrycode'))[1]]
+year_cols <- names(gdp_raw)[!tolower(names(gdp_raw)) %in% tolower(c(cn_col, cc_col))]
+gdp_long <- gdp_raw %>% select(all_of(c(cn_col, cc_col, year_cols))) %>% pivot_longer(cols = all_of(year_cols), names_to = 'year', values_to = 'gdp') %>% mutate(year = as.integer(str_extract(year,'[0-9]{4}')))
+gdp_long <- gdp_long %>% rename(country_name = !!sym(cn_col), country_code = !!sym(cc_col)) %>% mutate(country_code = toupper(trimws(as.character(country_code))), country_name = toupper(trimws(as.character(country_name))))
+latest_gdp <- gdp_long %>% filter(!is.na(gdp)) %>% arrange(country_code, desc(year)) %>% group_by(country_code) %>% slice_head(n=1) %>% ungroup() %>% select(country_code, country_name, gdp_latest = gdp)
+
+match_gdp <- function(code){
+  if(is.na(code) || code=='') return(NA_real_)
+  if(code %in% latest_gdp$country_code) return(latest_gdp$gdp_latest[which(latest_gdp$country_code==code)][1])
+  if(nchar(code)==2){ iso3 <- countrycode(code, 'iso2c','iso3c'); if(!is.na(iso3) && iso3 %in% latest_gdp$country_code) return(latest_gdp$gdp_latest[which(latest_gdp$country_code==iso3)][1]) }
+  nm <- toupper(code)
+  if(nm %in% latest_gdp$country_name) return(latest_gdp$gdp_latest[which(latest_gdp$country_name==nm)][1])
+  return(NA_real_)
+}
+
+panel$gdp_val <- vapply(panel$country, FUN = match_gdp, FUN.VALUE = numeric(1))
+miss_gdp <- sum(is.na(panel$gdp_val))
+if(miss_gdp > 0){ med <- median(latest_gdp$gdp_latest, na.rm = TRUE); panel$gdp_val[is.na(panel$gdp_val)] <- med; message('Imputed ', miss_gdp, ' missing GDPs by median (', round(med,2), ')') }
+
+panel <- panel %>% mutate(log_gdp = log(gdp_val + 1), count = origin_count + destination_count, log_count = log(count + 1))
+```
+
+## Boxplot analysis (from regression Rmd)
+
+```{r boxplots}
+# Boxplot of log_count by GDP quartile
+plot_df_clean <- panel %>% filter(!is.na(log_gdp) & !is.na(log_count)) %>%
+  mutate(gdp_quartile = cut_number(log_gdp, 4))
+
+p_support <- ggplot(plot_df_clean, aes(x = gdp_quartile, y = log_count)) +
+  geom_boxplot(fill = 'lightblue', alpha = 0.7) +
+  stat_summary(fun = mean, geom = 'point', shape = 18, size = 3, color = 'red') +
+  labs(x = 'GDP quartile', y = 'log(count + 1)', title = 'Trafficking activity by GDP quartile', subtitle = 'Red diamonds = group mean') +
+  theme_minimal()
+
+# Role boxplot (origin/destination role vs GDP)
+role_gdp <- panel %>% select(country, role, log_gdp) %>% filter(!is.na(role) & !is.na(log_gdp))
+p_role <- ggplot(role_gdp, aes(x = role, y = log_gdp, fill = role)) +
+  geom_boxplot(alpha = 0.7, outlier.shape = NA) +
+  geom_jitter(width = 0.2, alpha = 0.5, size = 1.5) +
+  scale_fill_brewer(palette = 'Set2') +
+  labs(title = 'Economic level by country role in trafficking network', x = 'Role', y = 'log(GDP)') +
+  theme_minimal() + theme(legend.position = 'none')
+
+# Save
+ggsave(file.path(base_path,'boxplot_gdp_quartile_more.png'), p_support, width = 8, height = 5, dpi = 150)
+ggsave(file.path(base_path,'boxplot_role_gdp_more.png'), p_role, width = 8, height = 5, dpi = 150)
+
+p_support; p_role
+```
+
+## QAP permutation test + permutation bar/hist plot
+
+```{r qap-run}
+stat_fun <- function(g){
+  m1 <- as.matrix(g[[1]]);
+  m2 <- as.matrix(g[[2]]);
+  diag(m1) <- NA; diag(m2) <- NA;
+  v1 <- as.vector(m1); v2 <- as.vector(m2);
+  ok <- !is.na(v1) & !is.na(v2);
+  if(sum(ok) < 3) return(NA);
+  return(cor(v1[ok], v2[ok], method='pearson'))
+}
+
+set.seed(123)
+effective_N <- nrow(A)
+
+# Add error checking
+cat('Running QAP with matrix dimensions:', dim(A), '\n')
+
+# Ensure matrices are numeric matrices without dimnames issues
+A_numeric <- as.matrix(A)
+B_gdp_numeric <- as.matrix(B_gdp)
+
+# Remove dimnames as sna package may be incompatible
+dimnames(A_numeric) <- NULL
+dimnames(B_gdp_numeric) <- NULL
+
+cat('Matrix types - A:', class(A_numeric), 'B_gdp:', class(B_gdp_numeric), '\n')
+cat('Matrix modes - A:', mode(A_numeric), 'B_gdp:', mode(B_gdp_numeric), '\n')
+
+if(effective_N > 150){
+  message('Matrix size > 150. Running QAP on top-100 countries by degree as approximation.')
+  deg <- rowSums(A_numeric, na.rm = TRUE) + colSums(A_numeric, na.rm = TRUE)
+  topk <- head(order(deg, decreasing = TRUE), 100)
+  A_sub <- A_numeric[topk, topk]
+  B_sub <- B_gdp_numeric[topk, topk]
+  
+  cat('Submatrix dimensions - A_sub:', dim(A_sub), 'B_sub:', dim(B_sub), '\n')
+  
+  qap_res <- tryCatch({
+    sna::qaptest(stat_fun, g = list(A_sub, B_sub), reps = 2000)
+  }, error = function(e) {
+    cat('QAP error with subset:', e$message, '\n')
+    NULL
+  })
+} else {
+  cat('Full matrix dimensions - A:', dim(A_numeric), 'B_gdp:', dim(B_gdp_numeric), '\n')
+  
+  qap_res <- tryCatch({
+    sna::qaptest(stat_fun, g = list(A_numeric, B_gdp_numeric), reps = 5000)
+  }, error = function(e) {
+    cat('QAP error with full matrix:', e$message, '\n')
+    NULL
+  })
+}
+
+if(is.null(qap_res)) {
+  # Try alternative method
+  cat('Trying alternative QAP method...\n')
+  
+  # Manually calculate observed value
+  A_vec <- as.vector(A_numeric)
+  B_vec <- as.vector(B_gdp_numeric)
+  valid_idx <- !is.na(A_vec) & !is.na(B_vec)
+  
+  obs_cor <- cor(A_vec[valid_idx], B_vec[valid_idx], method = 'pearson')
+  cat('Observed correlation:', obs_cor, '\n')
+  
+  # Manual permutation test
+  set.seed(123)
+  n_reps <- 1000
+  perm_cors <- numeric(n_reps)
+  
+  for(i in 1:n_reps) {
+    # Permute only rows of one matrix
+    perm_idx <- sample(nrow(A_numeric))
+    A_perm <- A_numeric[perm_idx, perm_idx]
+    perm_cors[i] <- stat_fun(list(A_perm, B_gdp_numeric))
+  }
+  
+  perm_cors <- perm_cors[!is.na(perm_cors)]
+  p_value <- mean(abs(perm_cors) >= abs(obs_cor))
+  
+  qap_res <- list(
+    obs = obs_cor,
+    gt = perm_cors,
+    p.value = p_value
+  )
+  
+  cat('Manual permutation test completed. p-value:', p_value, '\n')
+}
+
+
+# Calculate p-value
+pv <- if(!is.null(qap_res$p.value) && !is.na(qap_res$p.value)) {
+  qap_res$p.value
+} else {
+  mean(abs(qap_res$gt) >= abs(qap_res$obs), na.rm = TRUE)
+}
+
+qap_summary <- data.frame(
+  test = 'gdp_diff', 
+  observed = qap_res$obs, 
+  p_value = pv, 
+  reps = length(qap_res$gt)
+)
+
+readr::write_csv(qap_summary, file.path(base_path,'qap_summary_combined_more.csv'))
+saveRDS(qap_res, file.path(base_path,'qap_results_combined_more.rds'))
+
+cat('QAP Results:\n')
+print(qap_summary)
+
+# Ensure permutation statistics are available for plotting
+if(length(qap_res$gt) > 0 && !all(is.na(qap_res$gt))) {
+  perm_stats <- as.numeric(qap_res$gt)
+  perm_stats <- perm_stats[!is.na(perm_stats)]  # Remove NA values
+  
+  if(length(perm_stats) > 0) {
+    perm_df <- data.frame(stat = perm_stats)
+    
+    # Permutation distribution histogram
+    ph <- ggplot(perm_df, aes(x = stat)) + 
+      geom_histogram(bins = 30, fill = '#2c7fb8', color = 'white', alpha = 0.8) +
+      geom_vline(xintercept = qap_res$obs, color = 'red', size = 1.5, linetype = 'dashed') +
+      labs(
+        title = 'QAP Permutation Distribution',
+        subtitle = paste('Observed correlation:', round(qap_res$obs, 4), 
+                        '| p-value:', round(pv, 4)),
+        x = 'Permuted Correlation', 
+        y = 'Frequency'
+      ) +
+      theme_minimal()
+    
+    ggsave(file.path(base_path,'qap_permutation_hist_more.png'), ph, width = 8, height = 5, dpi = 150)
+    
+    # Bar plot
+    prop_ge <- mean(abs(perm_stats) >= abs(qap_res$obs))
+    bar_df <- data.frame(
+      category = c('Permuted >= |obs|', 'Permuted < |obs|'),
+      count = c(
+        sum(abs(perm_stats) >= abs(qap_res$obs)),
+        sum(abs(perm_stats) < abs(qap_res$obs))
+      )
+    )
+    
+    pb <- ggplot(bar_df, aes(x = category, y = count, fill = category)) + 
+      geom_col(alpha = 0.7) +
+      scale_fill_manual(values = c('#e41a1c', '#377eb8')) +
+      labs(
+        title = 'QAP Permutation Results',
+        subtitle = paste('Proportion >= |obs|:', round(prop_ge, 4)),
+        x = '', 
+        y = 'Count'
+      ) +
+      theme_minimal() +
+      theme(legend.position = 'none')
+    
+    ggsave(file.path(base_path,'qap_bar_plot_more.png'), pb, width = 7, height = 5, dpi = 150)
+    
+    # Display plots
+    print(ph)
+    print(pb)
+    
+  } else {
+    cat('No valid permutation statistics for plotting.\n')
+  }
+} else {
+  cat('No permutation statistics available for plotting.\n')
+}
+```
+
+## Outputs
+
+```{r outputs}
+cat('Saved: boxplots, adjacency/gdp matrices (csv/rds), and QAP results in project folder\\n')
+list.files(base_path, pattern = 'more', full.names = FALSE)
+```
