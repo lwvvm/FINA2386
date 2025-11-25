@@ -13,10 +13,10 @@ library(pheatmap); library(sna); library(countrycode); library(Matrix); library(
 ## Read & clean edge list
 
 ```{r read-clean}
-edge_files <- c('more.csv')
+edge_files <- c('less.csv')
 edge_path <- NULL
 for(f in edge_files){ p <- file.path(base_path, f); if(file.exists(p)){ edge_path <- p; break } }
-if(is.null(edge_path)) stop('No edge list found (expected more.csv)')
+if(is.null(edge_path)) stop('No edge list found (expected less.csv)')
 edges <- readr::read_csv(edge_path, guess_max = 10000, show_col_types = FALSE)
 
 # headerless detection
@@ -122,10 +122,51 @@ p_role <- ggplot(role_gdp, aes(x = role, y = log_gdp, fill = role)) +
   theme_minimal() + theme(legend.position = 'none')
 
 # Save
-ggsave(file.path(base_path,'boxplot_gdp_quartile_more.png'), p_support, width = 8, height = 5, dpi = 150)
-ggsave(file.path(base_path,'boxplot_role_gdp_more.png'), p_role, width = 8, height = 5, dpi = 150)
+ggsave(file.path(base_path,'boxplot_gdp_quartile_less.png'), p_support, width = 8, height = 5, dpi = 150)
+ggsave(file.path(base_path,'boxplot_role_gdp_less.png'), p_role, width = 8, height = 5, dpi = 150)
 
 p_support; p_role
+```
+
+## Build adjacency and GDP difference matrices for QAP
+```{r build-matrices}
+# Create country list and ensure order matches panel
+country_list <- panel$country
+
+# Build adjacency matrix A
+A <- matrix(0, nrow = length(country_list), ncol = length(country_list))
+rownames(A) <- country_list
+colnames(A) <- country_list
+
+# Fill adjacency matrix from edges
+for(i in 1:nrow(edges)) {
+  orig <- edges$origin[i]
+  dest <- edges$destination[i]
+  if(orig %in% country_list && dest %in% country_list) {
+    row_idx <- which(country_list == orig)
+    col_idx <- which(country_list == dest)
+    A[row_idx, col_idx] <- A[row_idx, col_idx] + 1
+  }
+}
+
+# Build GDP difference matrix B_gdp
+B_gdp <- matrix(0, nrow = length(country_list), ncol = length(country_list))
+rownames(B_gdp) <- country_list
+colnames(B_gdp) <- country_list
+
+# Fill GDP difference matrix (absolute difference in log GDP)
+for(i in 1:length(country_list)) {
+  for(j in 1:length(country_list)) {
+    gdp_i <- panel$log_gdp[panel$country == country_list[i]]
+    gdp_j <- panel$log_gdp[panel$country == country_list[j]]
+    if(length(gdp_i) > 0 && length(gdp_j) > 0) {
+      B_gdp[i, j] <- abs(gdp_i - gdp_j)
+    }
+  }
+}
+
+cat('Matrix dimensions - A:', dim(A), 'B_gdp:', dim(B_gdp), '\n')
+cat('A non-zero elements:', sum(A > 0), 'out of', length(A), '\n')
 ```
 
 ## QAP permutation test + permutation bar/hist plot
@@ -235,8 +276,8 @@ qap_summary <- data.frame(
   reps = length(qap_res$gt)
 )
 
-readr::write_csv(qap_summary, file.path(base_path,'qap_summary_combined_more.csv'))
-saveRDS(qap_res, file.path(base_path,'qap_results_combined_more.rds'))
+readr::write_csv(qap_summary, file.path(base_path,'qap_summary_combined_less.csv'))
+saveRDS(qap_res, file.path(base_path,'qap_results_combined_less.rds'))
 
 cat('QAP Results:\n')
 print(qap_summary)
@@ -262,7 +303,7 @@ if(length(qap_res$gt) > 0 && !all(is.na(qap_res$gt))) {
       ) +
       theme_minimal()
     
-    ggsave(file.path(base_path,'qap_permutation_hist_more.png'), ph, width = 8, height = 5, dpi = 150)
+    ggsave(file.path(base_path,'qap_permutation_hist_less.png'), ph, width = 8, height = 5, dpi = 150)
     
     # Bar plot
     prop_ge <- mean(abs(perm_stats) >= abs(qap_res$obs))
@@ -286,7 +327,7 @@ if(length(qap_res$gt) > 0 && !all(is.na(qap_res$gt))) {
       theme_minimal() +
       theme(legend.position = 'none')
     
-    ggsave(file.path(base_path,'qap_bar_plot_more.png'), pb, width = 7, height = 5, dpi = 150)
+    ggsave(file.path(base_path,'qap_bar_plot_less.png'), pb, width = 7, height = 5, dpi = 150)
     
     # Display plots
     print(ph)
@@ -304,5 +345,5 @@ if(length(qap_res$gt) > 0 && !all(is.na(qap_res$gt))) {
 
 ```{r outputs}
 cat('Saved: boxplots, adjacency/gdp matrices (csv/rds), and QAP results in project folder\\n')
-list.files(base_path, pattern = 'more', full.names = FALSE)
+list.files(base_path, pattern = 'less', full.names = FALSE)
 ```
