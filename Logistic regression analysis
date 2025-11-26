@@ -1,0 +1,235 @@
+---
+title: 'Regression Analysis: Gender ~ Age + CountryOfExploitation + Citizenship'
+author: "Belle Bei"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# 1. Install and Load Packages
+
+```{r packages}
+packages <- c("tidyverse", "readxl", "pROC", "broom")
+installed <- rownames(installed.packages())
+for (pkg in packages) {
+  if (!pkg %in% installed) install.packages(pkg, dependencies = TRUE)
+}
+library(tidyverse)
+library(readxl)
+library(pROC)
+library(broom)
+```
+
+# 2. Data Loading & Cleaning
+
+```{r data-cleaning}
+# Load data (ensure the file is in your working directory or provide the correct path)
+df <- read_excel("C:/Users/Belle Bei/OneDrive/桌面/Regression Data.xlsx", na = c("", "NA"))
+
+# Clean and preprocess
+df_clean <- df %>%
+  select(gender, ageBroad, CountryOfExploitation, citizenship) %>%
+  drop_na() %>%
+  filter(gender %in% c("Woman", "Man")) %>%
+  mutate(
+    gender_bin = ifelse(gender == "Woman", 1, 0),
+    across(c(ageBroad, CountryOfExploitation, citizenship), as.factor)
+  )
+
+# Filter top categories to avoid overfitting (keep top 10 for each)
+top_age <- df_clean %>% count(ageBroad) %>% top_n(10, n) %>% pull(ageBroad)
+top_exp <- df_clean %>% count(CountryOfExploitation) %>% top_n(10, n) %>% pull(CountryOfExploitation)
+top_cit <- df_clean %>% count(citizenship) %>% top_n(10, n) %>% pull(citizenship)
+
+df_final <- df_clean %>%
+  filter(ageBroad %in% top_age, 
+         CountryOfExploitation %in% top_exp, 
+         citizenship %in% top_cit)
+
+# Summary of cleaned data
+cat("=== Data Summary ===\n")
+cat("Final Sample Size:", nrow(df_final), "\n")
+cat("Gender Distribution:\n")
+print(table(df_final$gender))
+cat("\nTop 5 Age Groups:\n")
+print(head(sort(table(df_final$ageBroad), decreasing = TRUE), 5))
+cat("\nTop 5 Exploitation Countries:\n")
+print(head(sort(table(df_final$CountryOfExploitation), decreasing = TRUE), 5))
+cat("\nTop 5 Citizenships:\n")
+print(head(sort(table(df_final$citizenship), decreasing = TRUE), 5))
+```
+=== Data Summary ===
+Final Sample Size: 26383 
+Gender Distribution:
+
+  Man Woman 
+ 8352 18031 
+
+Top 5 Age Groups:
+
+30--38 09--17 18--20 21--23 39--47 
+  6302   3751   2946   2893   2769 
+
+Top 5 Exploitation Countries:
+
+ USA  UKR  RUS  MDA  IDN 
+6856 6102 4074 4018 1254 
+
+Top 5 Citizenships:
+
+ UKR  USA  MDA  NGA  BLR 
+9671 6748 4311 1973  810 
+# 3. Logistic Regression Model
+
+```{r regression-model}
+set.seed(42)
+train_idx <- sample(nrow(df_final), nrow(df_final) * 0.7)
+train <- df_final[train_idx, ]
+test <- df_final[-train_idx, ]
+
+logit_model <- glm(
+  gender_bin ~ ageBroad + CountryOfExploitation + citizenship,
+  data = train,
+  family = binomial(link = "logit"),
+  control = glm.control(maxit = 1500)
+)
+
+cat("\n=== Regression Model Summary ===\n")
+print(summary(logit_model))
+```
+=== Regression Model Summary ===
+
+Call:
+glm(formula = gender_bin ~ ageBroad + CountryOfExploitation + 
+    citizenship, family = binomial(link = "logit"), data = train, 
+    control = glm.control(maxit = 1500))
+
+Coefficients:
+                         Estimate Std. Error z value Pr(>|z|)    
+(Intercept)               3.39380    0.80992   4.190 2.79e-05 ***
+ageBroad09--17            0.64825    0.09812   6.607 3.92e-11 ***
+ageBroad18--20            2.27761    0.12242  18.605  < 2e-16 ***
+ageBroad21--23            2.23794    0.11692  19.140  < 2e-16 ***
+ageBroad24--26            1.73200    0.11083  15.628  < 2e-16 ***
+ageBroad27--29            1.41015    0.11368  12.405  < 2e-16 ***
+ageBroad30--38            0.95693    0.09832   9.733  < 2e-16 ***
+ageBroad39--47            0.68992    0.10619   6.497 8.18e-11 ***
+ageBroad48+               1.10493    0.11105   9.950  < 2e-16 ***
+CountryOfExploitationIDN -4.05485    0.31084 -13.045  < 2e-16 ***
+CountryOfExploitationLBY -6.05819    0.55395 -10.936  < 2e-16 ***
+CountryOfExploitationMDA -3.09348    0.45327  -6.825 8.81e-12 ***
+CountryOfExploitationMLI -3.65574    0.62903  -5.812 6.19e-09 ***
+CountryOfExploitationMYS -1.82464    0.28237  -6.462 1.03e-10 ***
+CountryOfExploitationPOL -2.67034    0.44840  -5.955 2.60e-09 ***
+CountryOfExploitationRUS -4.12798    0.43511  -9.487  < 2e-16 ***
+CountryOfExploitationUKR -3.96342    0.43555  -9.100  < 2e-16 ***
+CountryOfExploitationUSA -3.99755    0.40862  -9.783  < 2e-16 ***
+citizenshipBLR           -0.53523    0.79975  -0.669 0.503338    
+citizenshipIDN            0.15019    0.77355   0.194 0.846055    
+citizenshipKHM           -2.77667    0.78295  -3.546 0.000391 ***
+citizenshipMDA           -0.03750    0.80321  -0.047 0.962761    
+citizenshipMMR           -6.05596    0.96292  -6.289 3.19e-10 ***
+citizenshipNGA            2.36746    0.76882   3.079 0.002075 ** 
+citizenshipUKR           -0.74248    0.79515  -0.934 0.350427    
+citizenshipUSA            2.47039    0.80051   3.086 0.002029 ** 
+citizenshipVNM           -0.51582    0.80411  -0.641 0.521213    
+---
+Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+(Dispersion parameter for binomial family taken to be 1)
+
+    Null deviance: 23106  on 18467  degrees of freedom
+Residual deviance: 16321  on 18441  degrees of freedom
+AIC: 16375
+
+Number of Fisher Scoring iterations: 7
+
+
+=== Confusion Matrix ===
+       Predicted
+Actual   Man Woman
+  Man   1571   903
+  Woman  902  4539
+
+Accuracy: 0.772 
+Precision (Woman): 0.834 
+Recall (Woman): 0.834 
+F1-Score (Woman): 0.834 
+
+AUC Score: 0.828 
+R Console
+
+=== Data Insights & Conclusion ===
+1. Model Performance:
+   - Accuracy: ~ 77 %
+   - AUC: ~ 0.83  (indicates strong predictive power)
+
+2. Key Predictors:
+   - Country of Exploitation (e.g., Libya, Russia, Indonesia) and Citizenship (e.g., Myanmar, Cambodia) are the strongest predictors.
+   - Negative coefficients (red) indicate these features strongly predict 'Male' victims; positive coefficients (blue) would predict 'Female'.
+
+3. Geographic & Demographic Trends:
+   - Victims exploited in Libya, Russia, or Indonesia are far more likely to be male.
+   - Citizens from Myanmar or Cambodia are also disproportionately male victims.
+   - Younger age groups (implied by the model’s structure) likely correlate with female victimization (though not in the top 10 here).
+
+4. Practical Implications:
+   - Allocate male-focused support resources to Libya, Russia, and Indonesia.
+   - Target outreach and screening for Burmese and Cambodian male populations in high-risk regions.
+   - Use this model to identify gender patterns in trafficking cases where gender data is missing.
+
+# 4. Model Evaluation
+
+```{r model-evaluation}
+test$pred_prob <- predict(logit_model, newdata = test, type = "response")
+test$pred_class <- ifelse(test$pred_prob > 0.5, "Woman", "Man")
+
+conf_matrix <- table(
+  Actual = test$gender,
+  Predicted = test$pred_class
+)
+cat("\n=== Confusion Matrix ===\n")
+print(conf_matrix)
+
+accuracy <- sum(diag(conf_matrix)) / sum(conf_matrix)
+cat("\nAccuracy:", round(accuracy, 3), "\n")
+
+precision <- conf_matrix["Woman", "Woman"] / sum(conf_matrix[, "Woman"])
+recall <- conf_matrix["Woman", "Woman"] / sum(conf_matrix["Woman", ])
+f1 <- 2 * (precision * recall) / (precision + recall)
+cat("Precision (Woman):", round(precision, 3), "\n")
+cat("Recall (Woman):", round(recall, 3), "\n")
+cat("F1-Score (Woman):", round(f1, 3), "\n")
+
+roc_obj <- roc(as.numeric(test$gender == "Woman"), test$pred_prob)
+cat("\nAUC Score:", round(auc(roc_obj), 3), "\n")
+
+plot(roc_obj, main = paste0("ROC Curve (AUC = ", round(auc(roc_obj), 3), ")"))
+abline(a = 0, b = 1, lty = 2)
+```
+# 5. Feature Importance
+
+```{r feature-importance}
+coef_df <- tidy(logit_model) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(abs_coef = abs(estimate)) %>%
+  arrange(desc(abs_coef)) %>%
+  slice(1:10)
+
+cat("\n=== Top 10 Predictors of Gender ===\n")
+print(coef_df)
+
+ggplot(coef_df, aes(x = reorder(term, estimate), y = estimate, fill = estimate > 0)) +
+  geom_col() +
+  geom_text(aes(label = round(estimate, 2)), vjust = ifelse(coef_df$estimate > 0, 0.3, -0.3)) +
+  labs(title = "Top 10 Predictors of Gender", x = "Feature", y = "Logistic Coefficient") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  scale_fill_manual(values = c("#C73E1D", "#2E86AB"), labels = c("Male-Predominant", "Female-Predominant"))
+```
